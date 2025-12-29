@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Card } from '@/components/ui/Card';
 import { toast } from '@/components/ui/Toast';
+import { Meteors } from '@/components/ui/Meteors';
 import { getSupabaseClient } from '@/lib/supabase/client';
 
 export default function SignupPage() {
@@ -98,12 +99,17 @@ export default function SignupPage() {
   };
 
   return (
-    <div className="min-h-screen bg-offwhite flex items-center justify-center p-4">
+    <div className="min-h-screen bg-offwhite flex items-center justify-center p-4 relative overflow-hidden">
+      {/* Meteors Background Effect */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <Meteors number={30} />
+      </div>
+
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4 }}
-        className="w-full max-w-md"
+        className="w-full max-w-md relative z-10"
       >
         {/* Logo */}
         <Link href="/" className="flex items-center justify-center gap-2 mb-8">

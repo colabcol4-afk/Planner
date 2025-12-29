@@ -71,6 +71,7 @@ module.exports = {
         'slide-down': 'slideDown 0.3s cubic-bezier(0.2, 0.9, 0.15, 1)',
         'pulse-soft': 'pulseSoft 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
         'typing': 'typing 1.4s infinite',
+        'meteor': 'meteor 5s linear infinite',
       },
       keyframes: {
         fadeIn: {
@@ -93,6 +94,11 @@ module.exports = {
           '0%': { opacity: '0.2' },
           '20%': { opacity: '1' },
           '100%': { opacity: '0.2' },
+        },
+        meteor: {
+          '0%': { transform: 'rotate(215deg) translateX(0)', opacity: '1' },
+          '70%': { opacity: '1' },
+          '100%': { transform: 'rotate(215deg) translateX(-500px)', opacity: '0' },
         },
       },
     },

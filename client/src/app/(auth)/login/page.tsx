@@ -4,11 +4,12 @@ import { useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Sparkles, Mail, Lock, ArrowRight } from 'lucide-react';
+import { Sparkles, ArrowRight } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Card } from '@/components/ui/Card';
 import { toast } from '@/components/ui/Toast';
+import { Meteors } from '@/components/ui/Meteors';
 import { getSupabaseClient } from '@/lib/supabase/client';
 
 export default function LoginPage() {
@@ -75,12 +76,17 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-offwhite flex items-center justify-center p-4">
+    <div className="min-h-screen bg-offwhite flex items-center justify-center p-4 relative overflow-hidden">
+      {/* Meteors Background Effect */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <Meteors number={30} />
+      </div>
+
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4 }}
-        className="w-full max-w-md"
+        className="w-full max-w-md relative z-10"
       >
         {/* Logo */}
         <Link href="/" className="flex items-center justify-center gap-2 mb-8">
@@ -169,7 +175,13 @@ export default function LoginPage() {
             </Button>
           </form>
 
-          <div className="mt-6 text-center">
+          <div className="mt-4 text-center">
+            <Link href="/forgot-password" className="text-small text-brand-blue hover:underline">
+              Forgot your password?
+            </Link>
+          </div>
+
+          <div className="mt-4 text-center">
             <p className="text-small text-body">
               Don&apos;t have an account?{' '}
               <Link href="/signup" className="text-brand-blue hover:underline">
