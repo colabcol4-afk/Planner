@@ -7,8 +7,7 @@ from jose import jwt, JWTError
 
 from app.config import settings
 from app.db.supabase import get_supabase_client
-from app.services.llm.groq_client import GroqLLMClient
-from app.services.orchestrator.agent import AIOrchestrator
+from app.services.langgraph import VibePlannerAgent, get_agent as create_agent
 
 
 async def get_current_user(authorization: Optional[str] = Header(None)):
@@ -59,13 +58,9 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
         )
 
 
-def get_llm_client() -> GroqLLMClient:
-    """Get Groq LLM client instance."""
-    return GroqLLMClient(api_key=settings.groq_api_key)
-
-
-def get_orchestrator(
-    llm_client: GroqLLMClient = Depends(get_llm_client)
-) -> AIOrchestrator:
-    """Get AI orchestrator instance."""
-    return AIOrchestrator(llm_client=llm_client)
+def get_agent() -> VibePlannerAgent:
+    """
+    Get LangGraph agent instance.
+    Returns a configured VibePlannerAgent with ChatGroq and tools.
+    """
+    return create_agent(groq_api_key=settings.groq_api_key)

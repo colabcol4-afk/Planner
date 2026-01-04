@@ -1,5 +1,5 @@
 """
-WebSocket handler for streaming chat.
+WebSocket handler for streaming chat using LangGraph.
 """
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from typing import Dict, Optional
@@ -8,9 +8,7 @@ import uuid
 from jose import jwt, JWTError
 
 from app.config import settings
-from app.db.supabase import get_supabase_client
-from app.services.llm.groq_client import GroqLLMClient
-from app.services.orchestrator.agent import AIOrchestrator
+from app.services.langgraph import get_agent
 
 router = APIRouter()
 
@@ -98,13 +96,12 @@ async def chat_websocket(
         await manager.connect(websocket, user_id)
         print(f"WebSocket: User {user_id} connected successfully")
 
-        # Initialize orchestrator with error handling
+        # Initialize LangGraph agent with error handling
         try:
-            llm_client = GroqLLMClient(api_key=settings.groq_api_key)
-            orchestrator = AIOrchestrator(llm_client=llm_client)
-            print(f"WebSocket: Orchestrator initialized for user {user_id}")
+            agent = get_agent(groq_api_key=settings.groq_api_key)
+            print(f"WebSocket: LangGraph agent initialized for user {user_id}")
         except Exception as e:
-            print(f"WebSocket: Failed to initialize orchestrator: {e}")
+            print(f"WebSocket: Failed to initialize agent: {e}")
             import traceback
             traceback.print_exc()
             await websocket.send_json({
@@ -169,9 +166,9 @@ async def chat_websocket(
                 session_id = data.get("session_id") or str(uuid.uuid4())
                 print(f"WebSocket: Processing message from {user_id}: {content[:50]}...")
 
-                # Process message and stream response
+                # Process message and stream response using LangGraph
                 try:
-                    async for chunk in orchestrator.process_message(
+                    async for chunk in agent.process_message_stream(
                         user_id=user_id,
                         session_id=session_id,
                         message=content
