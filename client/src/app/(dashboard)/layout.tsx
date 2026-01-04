@@ -21,6 +21,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { getSupabaseClient } from '@/lib/supabase/client';
 import { toast } from '@/components/ui/Toast';
+import type { Database, UpdateTables } from '@/types/supabase';
 
 interface NavItem {
   href: string;
@@ -64,13 +65,13 @@ export default function DashboardLayout({
       });
 
       // Check if onboarding is completed
-      const { data: profile } = await supabase
+      const { data: profile, error } = await supabase
         .from('profiles')
         .select('onboarding_completed')
         .eq('id', user.id)
-        .single();
+        .single<{ onboarding_completed: boolean }>();
 
-      if (profile && !profile.onboarding_completed) {
+      if (!error && profile && !profile.onboarding_completed) {
         setShowOnboarding(true);
       }
 
@@ -90,6 +91,7 @@ export default function DashboardLayout({
       const supabase = getSupabaseClient();
       await supabase
         .from('profiles')
+        // @ts-ignore - Known issue: @supabase/ssr@0.5.2 type inference bug
         .update({ onboarding_completed: true })
         .eq('id', user.id);
     }

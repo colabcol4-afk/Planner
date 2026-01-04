@@ -77,7 +77,10 @@
 |------------|---------|---------|
 | FastAPI | 0.115.x | Async Python web framework |
 | Uvicorn | 0.34.x | ASGI server |
-| Groq SDK | 0.14.x+ | LLM API client |
+| LangChain Core | 0.3.x | LLM framework core |
+| LangChain Groq | 0.2.x+ | Groq integration for LangChain |
+| LangGraph | 0.2.53+ | Stateful agent orchestration |
+| LangGraph Checkpoint | 2.0.6+ | Agent state persistence |
 | Supabase | 2.11.x | Database client |
 | Pydantic | 2.x | Data validation |
 | python-jose | 3.3.x | JWT handling |
@@ -172,14 +175,15 @@ Planner/
 │   │   ├── db/
 │   │   │   └── supabase.py              # Supabase client
 │   │   ├── services/
+│   │   │   ├── langgraph/
+│   │   │   │   ├── agent.py             # VibePlannerAgent class (StateGraph)
+│   │   │   │   ├── state.py             # AgentState definition
+│   │   │   │   └── tools.py             # LangChain @tool functions
 │   │   │   ├── llm/
-│   │   │   │   ├── groq_client.py       # Groq API client
+│   │   │   │   ├── groq_client.py       # Groq API client (alternative)
 │   │   │   │   └── prompts.py           # System prompts
-│   │   │   ├── orchestrator/
-│   │   │   │   ├── agent.py             # AI orchestrator
-│   │   │   │   └── tool_executor.py     # Tool execution
 │   │   │   └── tools/
-│   │   │       └── schemas.py           # Tool definitions
+│   │   │       └── schemas.py           # Tool JSON schemas
 │   │   ├── __init__.py
 │   │   ├── config.py                    # Settings management
 │   │   └── dependencies.py              # FastAPI dependencies
@@ -682,10 +686,10 @@ router = APIRouter()
 async def send_message(
     request: ChatMessageRequest,
     user: dict = Depends(get_current_user),
-    orchestrator: AIOrchestrator = Depends(get_orchestrator),
+    agent: VibePlannerAgent = Depends(get_agent),
 ) -> ChatMessageResponse:
     """Non-streaming chat endpoint"""
-    # Process message through orchestrator
+    # Process message through LangGraph agent
     # Returns: { content, tool_calls, session_id }
 
 @router.get("/history/{session_id}", response_model=ConversationHistoryResponse)
@@ -904,9 +908,9 @@ async def chat_websocket(websocket: WebSocket, token: str = Query(...)):
 
     await manager.connect(websocket, user["id"])
 
-    # Initialize AI orchestrator
-    llm_client = GroqLLMClient(api_key=settings.groq_api_key)
-    orchestrator = AIOrchestrator(llm_client=llm_client)
+    # Initialize LangGraph agent
+    from app.services.langgraph.agent import VibePlannerAgent
+    agent = VibePlannerAgent(groq_api_key=settings.groq_api_key)
 
     # Send connection success
     await websocket.send_json({"type": "connected", "message": "Successfully connected"})
@@ -919,7 +923,7 @@ async def chat_websocket(websocket: WebSocket, token: str = Query(...)):
                 await websocket.send_json({"type": "pong"})
 
             elif data["type"] == "message":
-                async for chunk in orchestrator.process_message(
+                async for chunk in agent.process_message_stream(
                     user_id=user["id"],
                     session_id=data.get("session_id"),
                     message=data["content"]
@@ -932,69 +936,341 @@ async def chat_websocket(websocket: WebSocket, token: str = Query(...)):
 
 ### 5.4 Services
 
-#### LLM Client (`services/llm/groq_client.py`)
+#### LangGraph Agent (`services/langgraph/agent.py`)
+
+The backend uses **LangGraph** for stateful agent orchestration with automatic tool calling.
+
 ```python
-from groq import AsyncGroq
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_groq import ChatGroq
+from langgraph.graph import StateGraph, MessagesState
+from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
 
-class GroqLLMClient:
-    def __init__(self, api_key: str):
-        self.async_client = AsyncGroq(api_key=api_key)
-        self.model = settings.llm_model  # "openai/gpt-oss-120b"
+class AgentState(MessagesState):
+    """State definition for the agent graph"""
+    user_id: str              # Current user ID
+    session_id: str           # Conversation session ID
+    user_context: dict        # User profile, routines, preferences
 
-    def build_messages(
-        self,
-        user_message: str,
-        conversation_history: List[Dict],
-        user_context: Dict
-    ) -> List[Dict]:
-        """Build message list with system prompt and history"""
-        messages = [{"role": "system", "content": get_system_prompt(user_context, ...)}]
-        messages.extend(conversation_history[-20:])  # Last 20 messages
-        messages.append({"role": "user", "content": user_message})
-        return messages
+class VibePlannerAgent:
+    """LangGraph-based conversational agent with tool calling"""
 
-    async def chat_stream(
-        self,
-        user_message: str,
-        conversation_history: List[Dict],
-        user_context: Dict,
-    ) -> AsyncGenerator[Dict, None]:
-        """Stream chat completion with tool calling"""
-        stream = await self.async_client.chat.completions.create(
-            model=self.model,
-            messages=self.build_messages(...),
-            tools=TOOL_SCHEMAS,
-            tool_choice="auto",
-            stream=True,
-            max_tokens=settings.llm_max_tokens,
-            temperature=settings.llm_temperature,
+    def __init__(self, groq_api_key: str):
+        # Initialize LLM with Groq
+        self.llm = ChatGroq(
+            api_key=groq_api_key,
+            model="openai/gpt-oss-120b",
+            temperature=0.7,
         )
 
-        async for chunk in stream:
-            # Handle content chunks
-            if delta.content:
-                yield {"type": "content", "content": delta.content, "is_final": False}
+        # Import and bind tools
+        from app.services.langgraph.tools import (
+            create_task, update_task, delete_task, list_tasks,
+            create_routine, get_schedule, get_user_context
+        )
 
-            # Handle tool calls
-            if delta.tool_calls:
-                # Accumulate tool call arguments
-                yield {"type": "tool_call", "id": ..., "name": ..., "arguments": ...}
+        self.tools = [create_task, update_task, delete_task, list_tasks,
+                      create_routine, get_schedule, get_user_context]
+        self.llm_with_tools = self.llm.bind_tools(self.tools)
 
-            # Handle completion
-            if finish_reason:
-                yield {"type": "done", "finish_reason": finish_reason}
+        # Build StateGraph
+        self.graph = self._build_graph()
 
-    async def continue_with_tool_results(
+    def _build_graph(self) -> StateGraph:
+        """
+        Build the agent graph:
+        START → agent_node → [tools_condition] → tools_node → agent_node → END
+        """
+        graph = StateGraph(AgentState)
+
+        # Add nodes
+        graph.add_node("agent", self._agent_node)
+        graph.add_node("tools", ToolNode(self.tools))
+
+        # Add edges
+        graph.set_entry_point("agent")
+        graph.add_conditional_edges(
+            "agent",
+            self._tools_condition,
+            {
+                "tools": "tools",
+                "end": END
+            }
+        )
+        graph.add_edge("tools", "agent")
+
+        # Compile with checkpointer for state persistence
+        memory = MemorySaver()
+        return graph.compile(checkpointer=memory)
+
+    async def _agent_node(self, state: AgentState):
+        """Agent node - invokes LLM with system prompt and messages"""
+        # Build system prompt with context
+        system_prompt = self._build_system_prompt(
+            state["user_context"],
+            datetime.now()
+        )
+
+        # Invoke LLM
+        messages = [SystemMessage(content=system_prompt)] + state["messages"]
+        response = await self.llm_with_tools.ainvoke(messages)
+
+        return {"messages": [response]}
+
+    def _tools_node(self, state: AgentState):
+        """Tools node - executes tool calls with user_id injection"""
+        last_message = state["messages"][-1]
+
+        # Inject user_id into tool arguments
+        for tool_call in last_message.tool_calls:
+            tool_call["args"]["user_id"] = state["user_id"]
+
+        # Execute tools via ToolNode
+        results = ToolNode(self.tools).invoke(state)
+        return results
+
+    def _tools_condition(self, state: AgentState) -> str:
+        """Conditional edge - route to tools or end"""
+        last_message = state["messages"][-1]
+        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+            return "tools"
+        return "end"
+
+    async def process_message_stream(
         self,
-        conversation_history: List[Dict],
-        tool_results: List[Dict],
-        user_context: Dict
+        user_id: str,
+        session_id: str,
+        message: str
     ) -> AsyncGenerator[Dict, None]:
-        """Continue after tool execution"""
-        # Add tool results to messages and get follow-up response
+        """
+        Stream processing (for WebSocket):
+        1. Get user context and history
+        2. Save user message
+        3. Stream graph execution
+        4. Yield chunks as events occur
+        """
+        # Get context and history
+        user_context = await self.get_user_context(user_id)
+        history = await self.get_conversation_history(user_id, session_id)
+
+        # Build initial state
+        initial_state = {
+            "messages": history + [HumanMessage(content=message)],
+            "user_id": user_id,
+            "session_id": session_id,
+            "user_context": user_context,
+        }
+
+        # Stream graph execution
+        config = {"configurable": {"thread_id": session_id}}
+
+        async for event in self.graph.astream(initial_state, config):
+            # Agent node streaming
+            if "agent" in event:
+                ai_message = event["agent"]["messages"][0]
+                if ai_message.content:
+                    yield {
+                        "type": "stream",
+                        "content": ai_message.content,
+                        "is_final": False
+                    }
+
+            # Tools node execution
+            if "tools" in event:
+                for tool_message in event["tools"]["messages"]:
+                    yield {
+                        "type": "tool_result",
+                        "tool": tool_message.name,
+                        "success": True,
+                        "result": tool_message.content
+                    }
+
+        # Save conversation to database
+        await self.save_messages(user_id, session_id, initial_state["messages"])
+
+        yield {"type": "stream", "content": "", "is_final": True}
+
+    async def process_message(
+        self,
+        user_id: str,
+        session_id: str,
+        message: str
+    ) -> Dict:
+        """
+        Batch processing (for REST API):
+        Returns complete response after graph execution
+        """
+        # Similar to stream but uses ainvoke instead of astream
+        user_context = await self.get_user_context(user_id)
+        history = await self.get_conversation_history(user_id, session_id)
+
+        initial_state = {
+            "messages": history + [HumanMessage(content=message)],
+            "user_id": user_id,
+            "session_id": session_id,
+            "user_context": user_context,
+        }
+
+        config = {"configurable": {"thread_id": session_id}}
+        result = await self.graph.ainvoke(initial_state, config)
+
+        # Extract final AI message
+        final_message = result["messages"][-1]
+
+        return {
+            "content": final_message.content,
+            "tool_calls": getattr(final_message, "tool_calls", []),
+            "session_id": session_id
+        }
+
+    async def get_user_context(self, user_id: str) -> Dict:
+        """Fetch user profile, preferences, and routines from Supabase"""
+        # Implementation same as before
+        pass
+
+    async def get_conversation_history(self, user_id: str, session_id: str) -> List:
+        """Get last 20 messages from conversations table"""
+        # Returns list of LangChain message objects
+        pass
+
+    async def save_messages(self, user_id: str, session_id: str, messages: List):
+        """Persist conversation messages to database"""
+        pass
 ```
 
+**Key Features:**
+- **StateGraph**: Cyclic graph allowing agent → tools → agent loops
+- **MemorySaver**: Checkpoints state for resumable conversations
+- **Tool Binding**: LLM automatically generates tool calls
+- **User ID Injection**: Tools receive user_id from state, not client
+- **Streaming**: Yields chunks as graph nodes execute
+
+#### LangChain Tools (`services/langgraph/tools.py`)
+
+Tools are defined using LangChain's `@tool` decorator:
+
+```python
+from langchain_core.tools import tool
+from app.db.supabase import get_supabase_client
+
+@tool
+async def create_task(
+    title: str,
+    user_id: str,
+    description: str | None = None,
+    priority: str = "medium",
+    due_date: str | None = None,
+    due_time: str | None = None,
+    duration_minutes: int | None = None,
+    tags: list[str] | None = None
+) -> dict:
+    """Create a new task for the user.
+
+    Args:
+        title: Task title (required)
+        user_id: User ID (injected by agent)
+        description: Optional task description
+        priority: Task priority (low/medium/high/urgent)
+        due_date: Due date in YYYY-MM-DD format
+        due_time: Due time in HH:MM format
+        duration_minutes: Estimated duration
+        tags: List of tags
+    """
+    supabase = get_supabase_client()
+
+    task_data = {
+        "user_id": user_id,
+        "title": title,
+        "description": description,
+        "priority": priority,
+        "due_date": due_date,
+        "due_time": due_time,
+        "duration_minutes": duration_minutes,
+        "tags": tags or [],
+        "status": "pending",
+        "source": "conversation",
+    }
+
+    result = supabase.table("tasks").insert(task_data).execute()
+
+    # Log activity
+    await _log_activity(user_id, "create_task", result.data[0]["id"], title)
+
+    return {
+        "task_id": result.data[0]["id"],
+        "title": title,
+        "due_date": due_date,
+        "priority": priority,
+        "message": f"Created task '{title}' successfully"
+    }
+
+@tool
+async def update_task(task_id: str, user_id: str, **kwargs) -> dict:
+    """Update an existing task"""
+    # Similar implementation with RLS check
+    pass
+
+@tool
+async def delete_task(task_id: str, user_id: str) -> dict:
+    """Delete a task"""
+    pass
+
+@tool
+async def list_tasks(
+    user_id: str,
+    status: str | None = None,
+    date: str | None = None,
+    priority: str | None = None,
+    search: str | None = None
+) -> dict:
+    """List tasks with optional filters"""
+    pass
+
+@tool
+async def create_routine(title: str, day_type: str, user_id: str, **kwargs) -> dict:
+    """Create a recurring routine"""
+    pass
+
+@tool
+async def get_schedule(
+    user_id: str,
+    date: str | None = None,
+    week_of: str | None = None,
+    include_completed: bool = False
+) -> dict:
+    """Get schedule for a specific date or week"""
+    pass
+
+@tool
+async def get_user_context(
+    user_id: str,
+    include_routines: bool = True,
+    include_recent_tasks: bool = False
+) -> dict:
+    """Get user profile and preferences (system use only)"""
+    pass
+
+async def _log_activity(
+    user_id: str,
+    action_type: str,
+    task_id: str | None,
+    raw_text: str
+):
+    """Non-blocking activity logging"""
+    # Fire-and-forget async insert to activity_logs table
+    pass
+```
+
+**Tool Features:**
+- Type hints for automatic schema generation
+- Docstrings used by LLM to understand tool purpose
+- user_id always required but injected by agent
+- Activity logging for audit trail
+- RLS enforcement via user_id checks
+
 #### System Prompts (`services/llm/prompts.py`)
+
 ```python
 SYSTEM_PROMPT_TEMPLATE = """
 You are Vibe Planner, a friendly and efficient AI assistant for task and schedule management.
@@ -1038,160 +1314,6 @@ def get_system_prompt(
         preferences=json.dumps(user_context.get("preferences", {})),
         routines=format_routines(user_context.get("routines", [])),
     )
-```
-
-#### AI Orchestrator (`services/orchestrator/agent.py`)
-```python
-class AIOrchestrator:
-    def __init__(self, llm_client: GroqLLMClient):
-        self.llm_client = llm_client
-        self.supabase = get_supabase_client()
-
-    async def get_user_context(self, user_id: str) -> Dict:
-        """Fetch user profile, preferences, and routines"""
-        profile = await self.supabase.table("profiles").select("*").eq("id", user_id).single()
-        routines = await self.supabase.table("routines").select("*").eq("user_id", user_id).eq("is_active", True)
-        return {
-            "full_name": profile.get("full_name"),
-            "timezone": profile.get("timezone"),
-            "preferences": profile.get("preferences"),
-            "routines": routines,
-            "onboarding_completed": profile.get("onboarding_completed"),
-        }
-
-    async def get_conversation_history(self, user_id: str, session_id: str, limit: int = 20) -> List[Dict]:
-        """Get recent conversation messages"""
-        response = await self.supabase.table("conversations") \
-            .select("role, content, tool_calls, tool_call_id") \
-            .eq("user_id", user_id) \
-            .eq("session_id", session_id) \
-            .order("created_at") \
-            .limit(limit)
-        return response.data
-
-    async def save_message(self, user_id: str, session_id: str, role: str, content: str, ...):
-        """Store message in database"""
-        await self.supabase.table("conversations").insert({...})
-
-    async def process_message(
-        self,
-        user_id: str,
-        session_id: str,
-        message: str
-    ) -> AsyncGenerator[Dict, None]:
-        """
-        Main processing loop:
-        1. Get user context and history
-        2. Save user message
-        3. Stream LLM response
-        4. If tool calls, execute and continue
-        5. Save assistant response
-        """
-        user_context = await self.get_user_context(user_id)
-        history = await self.get_conversation_history(user_id, session_id)
-        await self.save_message(user_id, session_id, "user", message)
-
-        tool_executor = ToolExecutor(user_id)
-
-        async for chunk in self.llm_client.chat_stream(message, history, user_context):
-            if chunk["type"] == "content":
-                yield {"type": "stream", "content": chunk["content"], "is_final": False}
-
-            elif chunk["type"] == "tool_call":
-                yield {"type": "tool_call", "tool": chunk["name"], "args": chunk["arguments"], "status": "pending"}
-
-                # Execute tool
-                result = await tool_executor.execute(chunk["name"], chunk["arguments"])
-                yield {"type": "tool_result", "tool": chunk["name"], "success": result["success"], ...}
-
-                # Continue conversation with tool results
-                async for follow_up in self.llm_client.continue_with_tool_results(...):
-                    yield follow_up
-
-        yield {"type": "stream", "content": "", "is_final": True}
-```
-
-#### Tool Executor (`services/orchestrator/tool_executor.py`)
-```python
-class ToolExecutor:
-    def __init__(self, user_id: str):
-        self.user_id = user_id
-        self.supabase = get_supabase_client()
-
-    async def execute(self, tool_name: str, arguments: Dict) -> Dict:
-        """Route tool call to appropriate handler"""
-        handlers = {
-            "create_task": self._create_task,
-            "update_task": self._update_task,
-            "delete_task": self._delete_task,
-            "list_tasks": self._list_tasks,
-            "create_routine": self._create_routine,
-            "get_schedule": self._get_schedule,
-            "get_user_context": self._get_user_context,
-        }
-
-        if tool_name not in handlers:
-            return {"success": False, "error": f"Unknown tool: {tool_name}"}
-
-        return await handlers[tool_name](arguments)
-
-    async def _create_task(self, args: Dict) -> Dict:
-        """Create a new task"""
-        task_data = {
-            "user_id": self.user_id,
-            "title": args["title"],
-            "description": args.get("description"),
-            "priority": args.get("priority", "medium"),
-            "due_date": args.get("due_date"),
-            "due_time": args.get("due_time"),
-            "duration_minutes": args.get("duration_minutes"),
-            "status": "pending",
-            "source": "conversation",
-        }
-        result = await self.supabase.table("tasks").insert(task_data).execute()
-        return {"success": True, "result": result.data[0]}
-
-    async def _update_task(self, args: Dict) -> Dict:
-        """Update an existing task"""
-        task_id = args["task_id"]
-        updates = {k: v for k, v in args.items() if k != "task_id" and v is not None}
-        result = await self.supabase.table("tasks") \
-            .update(updates) \
-            .eq("id", task_id) \
-            .eq("user_id", self.user_id) \
-            .execute()
-        return {"success": True, "result": result.data[0]}
-
-    async def _delete_task(self, args: Dict) -> Dict:
-        """Delete a task"""
-        await self.supabase.table("tasks") \
-            .delete() \
-            .eq("id", args["task_id"]) \
-            .eq("user_id", self.user_id) \
-            .execute()
-        return {"success": True, "result": {"deleted": args["task_id"]}}
-
-    async def _list_tasks(self, args: Dict) -> Dict:
-        """List tasks with filters"""
-        query = self.supabase.table("tasks").select("*").eq("user_id", self.user_id)
-        if args.get("status"):
-            query = query.eq("status", args["status"])
-        if args.get("due_date"):
-            query = query.eq("due_date", args["due_date"])
-        result = await query.execute()
-        return {"success": True, "result": result.data}
-
-    async def _get_schedule(self, args: Dict) -> Dict:
-        """Get schedule for a date range"""
-        start_date = args.get("date", datetime.now().strftime("%Y-%m-%d"))
-        end_date = args.get("end_date", start_date)
-        tasks = await self.supabase.table("tasks") \
-            .select("*") \
-            .eq("user_id", self.user_id) \
-            .gte("due_date", start_date) \
-            .lte("due_date", end_date) \
-            .execute()
-        return {"success": True, "result": tasks.data}
 ```
 
 #### Tool Schemas (`services/tools/schemas.py`)
@@ -1337,11 +1459,10 @@ async def get_current_user(authorization: str = Header(...)) -> dict:
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
-def get_llm_client() -> GroqLLMClient:
-    return GroqLLMClient(api_key=settings.groq_api_key)
-
-def get_orchestrator(llm_client: GroqLLMClient = Depends(get_llm_client)) -> AIOrchestrator:
-    return AIOrchestrator(llm_client=llm_client)
+def get_agent() -> VibePlannerAgent:
+    """Factory for VibePlannerAgent instances"""
+    from app.services.langgraph.agent import VibePlannerAgent
+    return VibePlannerAgent(groq_api_key=settings.groq_api_key)
 ```
 
 ---
@@ -1890,11 +2011,12 @@ LLM_TEMPERATURE=0.7
 | **Chat Routes** | `server/app/api/routes/chat.py` | ~100 | Chat endpoints |
 | **Task Routes** | `server/app/api/routes/tasks.py` | ~150 | Task CRUD |
 | **WebSocket** | `server/app/api/websocket/chat_ws.py` | ~200 | WS handler |
-| **Groq Client** | `server/app/services/llm/groq_client.py` | ~250 | LLM client |
+| **LangGraph Agent** | `server/app/services/langgraph/agent.py` | ~350 | VibePlannerAgent (StateGraph) |
+| **Agent State** | `server/app/services/langgraph/state.py` | ~20 | AgentState definition |
+| **LangChain Tools** | `server/app/services/langgraph/tools.py` | ~300 | @tool decorated functions |
 | **Prompts** | `server/app/services/llm/prompts.py` | ~100 | System prompts |
-| **Orchestrator** | `server/app/services/orchestrator/agent.py` | ~280 | AI coordinator |
-| **Tool Executor** | `server/app/services/orchestrator/tool_executor.py` | ~200 | Tool execution |
-| **Tool Schemas** | `server/app/services/tools/schemas.py` | ~200 | Tool definitions |
+| **Groq Client** | `server/app/services/llm/groq_client.py` | ~250 | Alternative LLM client |
+| **Tool Schemas** | `server/app/services/tools/schemas.py` | ~200 | JSON schemas for validation |
 | **DB Schema** | `supabase/migrations/001_initial_schema.sql` | ~200 | Tables |
 | **RLS Policies** | `supabase/migrations/002_rls_policies.sql` | ~100 | Security |
 
